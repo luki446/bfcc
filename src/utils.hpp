@@ -4,3 +4,4 @@
 
 
 std::string ReadContentFromFile(std::filesystem::path const& path);
+std::string ReadContentFromStdin();
