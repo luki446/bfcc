@@ -1,6 +1,8 @@
 #include <CLI11.hpp>
+#include <print>
 #include "utils.hpp"
 #include "runner.hpp"
+#include "builder.hpp"
 
 int main(int argc, char** argv) {
     CLI::App app{"bfcc - Brainfuck (Overly)Complicated Compiler"};
@@ -8,20 +10,55 @@ int main(int argc, char** argv) {
 
     auto run_command = app.add_subcommand("run", "Run a Brainfuck program in interpreter mode");
 
-    std::filesystem::path input_file{};
+    std::string input_file{};
     run_command->add_option("input_file", input_file, "Path to the Brainfuck source file (reads from stdin if not provided)");
+
+    auto build_command = app.add_subcommand("build", "Build a Brainfuck program");
+    build_command->add_option("input_file", input_file, "Path to the Brainfuck source file (reads from stdin if not provided)");
+
+    auto emit_ir = build_command->add_flag("--emit-ir", "Emit the generated IR to stdout");
+    auto optimize = build_command->add_flag("-O,--optimize", "Optimize the generated code (does not work yet, but may make you feel better)");
+    auto verbose = build_command->add_flag("-v,--verbose", "Enable verbose output");
 
     CLI11_PARSE(app, argc, argv);
 
-    if(*run_command) {
-        std::string content;
-        if(!input_file.empty()) {
-            content = ReadContentFromFile(input_file);
-        } else {
-            content = ReadContentFromStdin();
-        }
-        RunProgram(content);
+    std::string content;
+    if(!input_file.empty()) {
+        content = ReadContentFromFile(input_file);
+    } else {
+        content = ReadContentFromStdin();
     }
 
+    if(*run_command) {
+        RunProgram(content);
+    } else if(*build_command) {
+        IRProgram program = BuildIR(content);
+
+        // Here optimize IR
+        // if(*optimize)
+        //     program = OptimizeIR(program);
+
+        if(*emit_ir) {
+            if(*verbose) {
+                std::println("{:=^40}", " IR Dump ");
+                std::println("Generated IR ({} instructions):", program.size());
+                std::println("{:=^40}", "");
+            }
+            std::println("{}", program);
+        } else { // emit executable
+            if(*verbose) {
+                std::println("{:=^40}", " Build Info ");
+                std::println("Building program with {} instructions", program.size());
+                std::println("{:=^40}", "");
+            }
+
+            // Here we should build the executable from IR
+            // For now, just print a message and exit
+
+            std::println(std::cerr, "Can't build executable yet, use 'run' command to interpret the code");
+            std::println(std::cerr, "Or use '--emit-ir' to see the generated IR");
+            return 1;
+        }   
+    }
     return 0;
 }

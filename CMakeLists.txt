@@ -8,4 +8,4 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include_directories(ext/CLI11)
 
-add_executable(bfcc src/main.cc src/utils.cc src/runner.cc)
+add_executable(bfcc src/main.cc src/utils.cc src/runner.cc src/builder.cc)
