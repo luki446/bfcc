@@ -35,8 +35,8 @@ int main(int argc, char** argv) {
         IRProgram program = BuildIR(content);
 
         // Here optimize IR
-        // if(*optimize)
-        //     program = OptimizeIR(program);
+        if(*optimize)
+            program = OptimizeIR(program);
 
         if(*emit_ir) {
             if(*verbose) {
