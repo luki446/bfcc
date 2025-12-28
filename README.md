@@ -22,7 +22,7 @@ Prereqs:
 Commands:
 
 ```powershell
-git clone --recursive <repo-url>
+git clone --recursive https://github.com/luki446/bfcc
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ```
