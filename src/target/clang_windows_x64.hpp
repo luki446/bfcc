@@ -5,4 +5,6 @@
 class ClangWindowsX64Target : public Target {
 public:
     void compile(IRProgram const& program, std::filesystem::path const& outputPath) override;
+private:
+    std::string generateAssembly(IRProgram const& program);
 };

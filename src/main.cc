@@ -16,9 +16,14 @@ int main(int argc, char** argv) {
 
     auto build_command = app.add_subcommand("build", "Build a Brainfuck program");
     build_command->add_option("input_file", input_file, "Path to the Brainfuck source file (reads from stdin if not provided)");
+    auto output_file = build_command->add_option("-o,--output", "Path to the output executable file")->default_str("a.out");
 
+    auto available_targets = TargetRegistry::get().getTargetsList();
+    auto target_option = build_command->add_option("--target", "Target to build for")->default_str("x86_64-clang-windows")->check(CLI::IsMember(available_targets));
+
+    auto list_targets = build_command->add_flag("--list-targets", "List all available targets");
     auto emit_ir = build_command->add_flag("--emit-ir", "Emit the generated IR to stdout");
-    auto optimize = build_command->add_flag("-O,--optimize", "Optimize the generated code (does not work yet, but may make you feel better)");
+    auto optimize = build_command->add_flag("-O,--optimize", "Optimize the generated code");
     auto verbose = build_command->add_flag("-v,--verbose", "Enable verbose output");
 
     CLI11_PARSE(app, argc, argv);
@@ -33,6 +38,13 @@ int main(int argc, char** argv) {
     if(*run_command) {
         RunProgram(content);
     } else if(*build_command) {
+        if(*list_targets) {
+            for(auto const& target_name : available_targets) {
+                std::println("{}", target_name);
+            }
+            return 0;
+        }
+
         IRProgram program = BuildIR(content);
 
         // Here optimize IR
@@ -53,9 +65,9 @@ int main(int argc, char** argv) {
                 std::println("{:=^40}", "");
             }
 
-            auto target = TargetRegistry::get().createTarget("x86_64-clang-windows");
+            auto target = TargetRegistry::get().createTarget(target_option->as<std::string>());
 
-            std::filesystem::path output_path = "a.out";
+            std::filesystem::path output_path = output_file->as<std::string>();
             target->compile(program, output_path);
         }   
     }

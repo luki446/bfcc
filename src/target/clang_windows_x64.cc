@@ -1,12 +1,17 @@
 #include "clang_windows_x64.hpp"
 
-#include <fstream>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/writable_pipe.hpp>
+#include <boost/process.hpp>
+#include <boost/asio.hpp>
+#include <boost/process/v2/environment.hpp>
+#include <boost/process/v2/process.hpp>
+#include <boost/process/v2/stdio.hpp>
 
 struct X64AsmVisitor {
     X64AsmVisitor(int32_t instruction_index) : ir_instruction_index_(instruction_index) {}
 
     // RBX - data pointer
-    // R11 - pointer to the start of the tape
 
     std::string operator()(MovePtr const& move_ptr) {
         return std::format("\tadd rbx, {}\n", move_ptr.offset());
@@ -52,7 +57,7 @@ struct X64AsmVisitor {
     int32_t ir_instruction_index_;
 };
 
-void ClangWindowsX64Target::compile(IRProgram const& program, std::filesystem::path const& outputPath) {
+std::string ClangWindowsX64Target::generateAssembly(IRProgram const& program) {
     std::string asm_code{};
 
     asm_code += R"(
@@ -87,17 +92,43 @@ main:
     pop rbx
     ret)"; // Standard footer
 
-    std::filesystem::path asm_file = outputPath;
+    return asm_code;
+}
 
-    asm_file.replace_extension(".asm");
+void ClangWindowsX64Target::compile(IRProgram const& program, std::filesystem::path const& outputPath) {
+    std::string asm_code = generateAssembly(program);
 
-    std::ofstream ofs{asm_file, std::ios::out | std::ios::trunc};
-    if(!ofs) {
-        throw std::runtime_error("Failed to open output file: " + asm_file.string());
+    std::filesystem::path exe_path = outputPath;;
+    exe_path.replace_extension(".exe");
+
+    boost::asio::io_context ctx{};
+    boost::asio::writable_pipe writable_pipe{ctx};
+
+    auto clang_path = boost::process::v2::environment::find_executable("clang");
+
+    if(clang_path.empty()) {
+        throw std::runtime_error("Clang not found in PATH");
     }
 
-    ofs << asm_code;
-    ofs.close();
+    boost::process::process proc(ctx, clang_path, 
+        {"-x", "assembler", 
+        "-o", exe_path.string(), 
+        "-"},
+        boost::process::process_stdio{
+            writable_pipe,
+            {},
+            {}
+        }
+    );
+
+    boost::asio::write(writable_pipe, boost::asio::buffer(asm_code));
+    writable_pipe.close();
+
+    proc.wait();
+
+    if(proc.exit_code() != 0) {
+        throw std::runtime_error("Clang failed to compile assembly code");
+    }
 }
 
 static RegisterTarget<ClangWindowsX64Target> registerClangWindowsX64Target{"x86_64-clang-windows"};
