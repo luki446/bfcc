@@ -3,6 +3,7 @@
 #include "utils.hpp"
 #include "runner.hpp"
 #include "builder.hpp"
+#include "compiler.hpp"
 
 int main(int argc, char** argv) {
     CLI::App app{"bfcc - Brainfuck (Overly)Complicated Compiler"};
@@ -52,12 +53,10 @@ int main(int argc, char** argv) {
                 std::println("{:=^40}", "");
             }
 
-            // Here we should build the executable from IR
-            // For now, just print a message and exit
+            auto target = TargetRegistry::get().createTarget("x86_64-clang-windows");
 
-            std::println(std::cerr, "Can't build executable yet, use 'run' command to interpret the code");
-            std::println(std::cerr, "Or use '--emit-ir' to see the generated IR");
-            return 1;
+            std::filesystem::path output_path = "a.out";
+            target->compile(program, output_path);
         }   
     }
     return 0;
