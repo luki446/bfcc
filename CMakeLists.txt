@@ -12,7 +12,7 @@ set(BOOST_INCLUDE_LIBRARIES process filesystem system)
 
 add_subdirectory(ext/boost SYSTEM)
 
-add_executable(bfcc src/main.cc src/utils.cc src/runner.cc src/builder.cc src/compiler.cc src/target/clang_windows_x64.cc)
+add_executable(bfcc src/main.cc src/utils.cc src/runner.cc src/builder.cc src/compiler.cc src/target/clang_windows_x64.cc src/target/clang_linux_x64.cc)
 
 target_compile_definitions(bfcc PRIVATE BOOST_ALL_NO_LIB)
 

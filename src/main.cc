@@ -18,8 +18,16 @@ int main(int argc, char** argv) {
     build_command->add_option("input_file", input_file, "Path to the Brainfuck source file (reads from stdin if not provided)");
     auto output_file = build_command->add_option("-o,--output", "Path to the output executable file")->default_str("a.out");
 
+#if defined(_WIN32)
+    constexpr auto default_target = "x86_64-clang-windows";
+#elif defined(__APPLE__)
+    constexpr auto default_target = "x86_64-clang-macos";
+#else
+    constexpr auto default_target = "x86_64-clang-linux";
+#endif
+
     auto available_targets = TargetRegistry::get().getTargetsList();
-    auto target_option = build_command->add_option("--target", "Target to build for")->default_str("x86_64-clang-windows")->check(CLI::IsMember(available_targets));
+    auto target_option = build_command->add_option("--target", "Target to build for")->default_str(default_target)->check(CLI::IsMember(available_targets));
 
     auto list_targets = build_command->add_flag("--list-targets", "List all available targets");
     auto emit_ir = build_command->add_flag("--emit-ir", "Emit the generated IR to stdout");
