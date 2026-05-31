@@ -1,12 +1,7 @@
 #include "clang_windows_x64.hpp"
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/writable_pipe.hpp>
-#include <boost/process.hpp>
-#include <boost/asio.hpp>
-#include <boost/process/v2/environment.hpp>
-#include <boost/process/v2/process.hpp>
-#include <boost/process/v2/stdio.hpp>
+#include <windows.h>
+#include <stdio.h>
 
 struct X64AsmVisitor {
     X64AsmVisitor(int32_t instruction_index) : ir_instruction_index_(instruction_index) {}
@@ -57,7 +52,7 @@ struct X64AsmVisitor {
     int32_t ir_instruction_index_;
 };
 
-std::string ClangWindowsX64Target::generateAssembly(IRProgram const& program) {
+std::string ClangWindowsX64Target::doGenerateAssembly(IRProgram const& program) {
     std::string asm_code{};
 
     asm_code += R"(
@@ -77,10 +72,10 @@ main:
     push rbx
 
     sub rsp, 32
-    
+
     lea rbx, tape[rip]
 )"; // Standard header and 32-byte shadow space + 16-byte alignment and tape allocation
-    
+
     for(int32_t i = 0; i < program.size(); ++i) {
         asm_code += std::visit(X64AsmVisitor{i}, program[i]);
     }
@@ -95,40 +90,136 @@ main:
     return asm_code;
 }
 
-void ClangWindowsX64Target::compile(IRProgram const& program, std::filesystem::path const& outputPath) {
-    std::string asm_code = generateAssembly(program);
-
-    std::filesystem::path exe_path = outputPath;;
-    exe_path.replace_extension(".exe");
-
-    boost::asio::io_context ctx{};
-    boost::asio::writable_pipe writable_pipe{ctx};
-
-    auto clang_path = boost::process::v2::environment::find_executable("clang");
-
-    if(clang_path.empty()) {
-        throw std::runtime_error("Clang not found in PATH");
-    }
-
-    boost::process::process proc(ctx, clang_path, 
-        {"-x", "assembler", 
-        "-o", exe_path.string(), 
-        "-"},
-        boost::process::process_stdio{
-            writable_pipe,
-            {},
-            {}
-        }
-    );
-
-    boost::asio::write(writable_pipe, boost::asio::buffer(asm_code));
-    writable_pipe.close();
-
-    proc.wait();
-
-    if(proc.exit_code() != 0) {
-        throw std::runtime_error("Clang failed to compile assembly code");
-    }
+void ClangWindowsX64Target::doGenerateAssembly(IRProgram const& program, CompilationResult& result) {
+    result.generatedCode = doGenerateAssembly(program);
+    result.success = true;
 }
 
-static RegisterTarget<ClangWindowsX64Target> registerClangWindowsX64Target{"x86_64-clang-windows"};
+CompilationResult ClangWindowsX64Target::generateAssembly(IRProgram const& program) {
+    CompilationResult result;
+    doGenerateAssembly(program, result);
+    return result;
+}
+
+void ClangWindowsX64Target::doCompile(IRProgram const& program, std::filesystem::path const& outputPath, CompilationResult& result) {
+    std::string asm_code = doGenerateAssembly(program);
+
+    std::filesystem::path exe_path = outputPath;
+    exe_path.replace_extension(".exe");
+    result.outputPath = exe_path;
+
+    // Find clang executable
+    char clang_path_buf[MAX_PATH];
+    DWORD searchResult = SearchPathA(nullptr, "clang.exe", nullptr, MAX_PATH, clang_path_buf, nullptr);
+
+    if (searchResult == 0) {
+        result.success = false;
+        result.errorMessage = "Clang not found in PATH";
+        return;
+    }
+
+    // Create pipes for communication with clang process
+    HANDLE hPipeRead = nullptr;
+    HANDLE hPipeWrite = nullptr;
+
+    SECURITY_ATTRIBUTES saAttr{};
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = nullptr;
+
+    if (!CreatePipe(&hPipeRead, &hPipeWrite, &saAttr, 0)) {
+        result.success = false;
+        result.errorMessage = "Failed to create pipe";
+        return;
+    }
+
+    // Ensure the write handle is not inherited
+    if (!SetHandleInformation(hPipeWrite, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(hPipeRead);
+        CloseHandle(hPipeWrite);
+        result.success = false;
+        result.errorMessage = "Failed to set pipe handle information";
+        return;
+    }
+
+    // Prepare startup info
+    STARTUPINFOA siStartInfo{};
+    siStartInfo.cb = sizeof(STARTUPINFOA);
+    siStartInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    siStartInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    siStartInfo.hStdInput = hPipeRead;
+    siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+    // Build command line
+    std::string cmdLine = std::string("\"") + clang_path_buf + "\" -x assembler -o " + exe_path.string() + " -";
+
+    // Create process
+    PROCESS_INFORMATION piProcInfo{};
+
+    BOOL bSuccess = CreateProcessA(
+        nullptr,                    // Application name
+        cmdLine.data(),             // Command line
+        nullptr,                    // Process security attributes
+        nullptr,                    // Thread security attributes
+        TRUE,                       // Inherit handles
+        0,                          // Creation flags
+        nullptr,                    // Environment block
+        nullptr,                    // Current directory
+        &siStartInfo,               // Startup info
+        &piProcInfo                 // Process info
+    );
+
+    CloseHandle(hPipeRead);
+
+    if (!bSuccess) {
+        CloseHandle(hPipeWrite);
+        result.success = false;
+        result.errorMessage = "Failed to create clang process";
+        return;
+    }
+
+    // Write assembly code to clang's stdin
+    DWORD bytesWritten = 0;
+    if (!WriteFile(hPipeWrite, asm_code.data(), static_cast<DWORD>(asm_code.size()), &bytesWritten, nullptr)) {
+        CloseHandle(hPipeWrite);
+        CloseHandle(piProcInfo.hProcess);
+        CloseHandle(piProcInfo.hThread);
+        result.success = false;
+        result.errorMessage = "Failed to write assembly code to clang";
+        return;
+    }
+
+    CloseHandle(hPipeWrite);
+
+    // Wait for clang to finish
+    WaitForSingleObject(piProcInfo.hProcess, INFINITE);
+
+    // Get exit code
+    DWORD exitCode = 0;
+    if (!GetExitCodeProcess(piProcInfo.hProcess, &exitCode)) {
+        CloseHandle(piProcInfo.hProcess);
+        CloseHandle(piProcInfo.hThread);
+        result.success = false;
+        result.errorMessage = "Failed to get clang exit code";
+        return;
+    }
+
+    CloseHandle(piProcInfo.hProcess);
+    CloseHandle(piProcInfo.hThread);
+
+    if (exitCode != 0) {
+        result.success = false;
+        result.errorMessage = "Clang failed to compile assembly code";
+        return;
+    }
+
+    result.success = true;
+}
+
+CompilationResult ClangWindowsX64Target::compile(IRProgram const& program, std::filesystem::path const& outputPath) {
+    CompilationResult result;
+    doCompile(program, outputPath, result);
+    return result;
+}
+
+static RegisterTarget<ClangWindowsX64Target> registerClangWindowsX64Target{"x86_64-clang-windows", "Windows x86_64 using Clang assembler"};
