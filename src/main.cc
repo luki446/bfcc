@@ -38,8 +38,9 @@ int main(int argc, char** argv) {
     auto list_targets = build_command->add_flag("--list-targets", "List all available targets");
     auto emit_ir = build_command->add_flag("--emit-ir", "Emit the generated IR to stdout");
     auto emit_asm = build_command->add_flag("--emit-asm", "Emit the generated assembly to stdout");
+    auto output_format = build_command->add_option("--output-format", "Output format (exe, c, asm)")->default_str("exe")->check(CLI::IsMember({"exe", "c", "asm"}));
     auto optimize = build_command->add_flag("-O,--optimize", "Optimize the generated code");
-    auto optimize_level = build_command->add_option("--optimize-level", "Optimization level (0=none, 1=basic)")->default_str("1");
+    auto optimize_level = build_command->add_option("--optimize-level", "Optimization level (0=none, 1=basic, 2=advanced)")->default_str("1");
     auto verbose = build_command->add_flag("-v,--verbose", "Enable verbose output");
 
     CLI11_PARSE(app, argc, argv);
@@ -94,6 +95,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        std::string format = output_format->as<std::string>();
+
         if(*emit_ir) {
             if(*verbose) {
                 std::println("{:=^40}", " IR Dump ");
@@ -101,7 +104,7 @@ int main(int argc, char** argv) {
                 std::println("{:=^40}", "");
             }
             std::println("{}", program);
-        } else if(*emit_asm) {
+        } else if(format == "asm" || *emit_asm) {
             if(*verbose) {
                 std::println("{:=^40}", " Assembly Generation ");
                 std::println("Generating assembly for target: {}", target_option->as<std::string>());
@@ -114,6 +117,23 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::print("{}", result.generatedCode);
+        } else if(format == "c") {
+            // Use C target regardless of --target selection
+            auto c_target = TargetRegistry::get().createTarget("portable-c");
+            if(!c_target) {
+                std::println("Error: C target not available");
+                return 1;
+            }
+
+            std::filesystem::path output_path = output_file->as<std::string>();
+            auto result = c_target->compile(program, output_path);
+
+            if(!result.success) {
+                std::println("Build failed: {}", result.errorMessage);
+                return 1;
+            }
+
+            std::println("Generated C source: {}", result.outputPath.string());
         } else { // emit executable
             if(*verbose) {
                 std::println("{:=^40}", " Build Info ");
