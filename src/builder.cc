@@ -155,51 +155,13 @@ IRProgram CombineConsecutivePass(IRProgram const& program) {
     return optimized;
 }
 
-// Pass 2: Dead Code Elimination - remove loops that are provably never entered
-// This is a simple DCE that removes empty loops and loops with only no-op content
-// Conservative: only removes truly empty loops (no instructions at all inside)
-IRProgram DeadCodeEliminationPass(IRProgram const& program) {
-    if(program.empty()) {
+// Pass 2: Clear Cell Detection
+// Replaces [-] and [+] loops (single ChangeValue{-1} or {+1} body) with ClearCell
+// These are the most common Brainfuck patterns for setting a cell to zero
+IRProgram ClearCellPass(IRProgram const& program) {
+    if(program.size() < 3) {
         return program;
     }
-
-    IRProgram optimized{};
-
-    size_t i = 0;
-    while(i < program.size()) {
-        if(std::holds_alternative<LoopStart>(program[i])) {
-            int32_t jump_offset = std::get<LoopStart>(program[i]).jump_offset();
-            size_t loop_end_pos = i + jump_offset;
-            size_t loop_body_size = loop_end_pos - i - 1;
-
-            // Only remove truly empty loops (no body at all)
-            // A loop with any instruction could have side effects
-            if(loop_body_size == 0) {
-                // Empty loop - skip both LoopStart and LoopEnd
-                i = loop_end_pos + 1;
-                continue;
-            }
-
-            // Copy the loop
-            optimized.emplace_back(program[i]);
-            ++i;
-        } else {
-            optimized.emplace_back(program[i]);
-            ++i;
-        }
-    }
-
-    // Rebuild loop offsets since positions may have changed
-    return CombineConsecutivePass(optimized);
-}
-
-// Pass 3: Loop Invariant Code Motion
-// For Brainfuck, we can optimize the common pattern where a loop moves away from
-// and back to the original cell: [>...<] - the net position change is zero
-// We can't easily hoist operations without full data-flow analysis, but we can
-// recognize and normalize these patterns for better code generation
-IRProgram LoopInvariantMotionPass(IRProgram const& program) {
-    if(program.empty()) return program;
 
     IRProgram result{};
     result.reserve(program.size());
@@ -210,24 +172,23 @@ IRProgram LoopInvariantMotionPass(IRProgram const& program) {
             auto const& loop_start = std::get<LoopStart>(program[i]);
             int32_t jump_offset = loop_start.jump_offset();
             size_t loop_end_pos = i + jump_offset;
+            size_t loop_body_size = loop_end_pos - i - 1;
 
-            // Check for pattern: [ MovePtr(offset) ... MovePtr(-offset) ]
-            // where the loop body starts and ends with compensating moves
-            if(loop_end_pos >= i + 3 &&  // At least: start, move, something, move, end
-               std::holds_alternative<MovePtr>(program[i + 1]) &&
-               std::holds_alternative<MovePtr>(program[loop_end_pos - 1])) {
-
-                auto const& first_move = std::get<MovePtr>(program[i + 1]);
-                auto const& last_move = std::get<MovePtr>(program[loop_end_pos - 1]);
-
-                if(first_move.offset() == -last_move.offset()) {
-                    // Compensating moves detected - the loop returns to original position
-                    // This is already optimal for Brainfuck, but we note the pattern
-                    // A more advanced optimizer could use this for register allocation hints
+            // Check for [-] pattern: LoopStart, single ChangeValue{-1 or +1}, LoopEnd
+            if(loop_body_size == 1) {
+                auto const& body = program[i + 1];
+                if(std::holds_alternative<ChangeValue>(body)) {
+                    auto const& cv = std::get<ChangeValue>(body);
+                    if(cv.delta() == -1 || cv.delta() == 1) {
+                        // This is a [-] or [+] clear-cell loop
+                        result.emplace_back(ClearCell{cv.location()});
+                        // Skip LoopStart, body, and LoopEnd
+                        i = loop_end_pos + 1;
+                        continue;
+                    }
                 }
             }
 
-            // Copy the loop as-is
             result.emplace_back(program[i]);
             ++i;
         } else {
@@ -239,117 +200,16 @@ IRProgram LoopInvariantMotionPass(IRProgram const& program) {
     return result;
 }
 
-// Pass 4: Strength Reduction
-// Converts expensive operations into cheaper equivalents
-// For Brainfuck:
-// - Recognizes [-] as cell-clear (cannot eliminate without knowing runtime state)
-// - Converts multiple single increments to larger ChangeValue where possible
-IRProgram StrengthReductionPass(IRProgram const& program) {
-    if(program.size() < 2) {
-        return program;
-    }
-
-    IRProgram result{};
-    result.reserve(program.size());
-
-    for(size_t i = 0; i < program.size(); ++i) {
-        // Pattern recognition for [-] cell-clear loop
-        // While we can't eliminate it (need runtime semantics),
-        // recognizing it helps future passes
-        if(std::holds_alternative<LoopStart>(program[i])) {
-            int32_t jump_offset = std::get<LoopStart>(program[i]).jump_offset();
-            size_t loop_end_pos = i + jump_offset;
-
-            // Check for [-] pattern: LoopStart + ChangeValue + LoopEnd
-            if(loop_end_pos == i + 2) {
-                auto const& body = program[i + 1];
-                if(std::holds_alternative<ChangeValue>(body)) {
-                    auto const& cv = std::get<ChangeValue>(body);
-                    // [-] or [+] with delta of 1 or -1 is a clear/infinite loop
-                    // Keep as-is - runtime handles it
-                }
-            }
-        }
-
-        result.emplace_back(program[i]);
-    }
-
-    return result;
-}
-
-// Pass 5: Common Subexpression Elimination
-// For Brainfuck, we look for redundant operations like:
-// - MovePtr(n) followed by MovePtr(-n) with no intervening memory access
-// - ChangeValue(n) followed by ChangeValue(-n) with no intervening read
-IRProgram CommonSubexpressionEliminationPass(IRProgram const& program) {
-    if(program.size() < 3) {
-        return program;
-    }
-
-    IRProgram result{};
-    result.reserve(program.size());
-
-    // Track net movement and value changes since last memory access
-    int32_t net_ptr_movement = 0;
-    int32_t net_cell_change = 0;
-    bool ptr_tracking_active = true;
-    bool cell_tracking_active = true;
-
-    for(size_t i = 0; i < program.size(); ++i) {
-        auto const& instr = program[i];
-
-        if(std::holds_alternative<OutputCharacter>(instr) ||
-           std::holds_alternative<InputCharacter>(instr)) {
-            // Memory access - reset tracking
-            ptr_tracking_active = false;
-            cell_tracking_active = false;
-            result.emplace_back(instr);
-        }
-        else if(std::holds_alternative<LoopStart>(instr) ||
-                std::holds_alternative<LoopEnd>(instr)) {
-            // Control flow - reset tracking (conservative)
-            ptr_tracking_active = false;
-            cell_tracking_active = false;
-            result.emplace_back(instr);
-        }
-        else if(std::holds_alternative<MovePtr>(instr)) {
-            int32_t offset = std::get<MovePtr>(instr).offset();
-
-            // Check if this move cancels previous movement
-            if(ptr_tracking_active && net_ptr_movement != 0 && offset == -net_ptr_movement) {
-                // Canceling move detected - skip both
-                net_ptr_movement = 0;
-                // Remove the previous tracked moves from result
-                // (simplified: just don't add this one, previous will be handled by next pass)
-            } else {
-                net_ptr_movement += offset;
-                result.emplace_back(instr);
-            }
-        }
-        else if(std::holds_alternative<ChangeValue>(instr)) {
-            int32_t delta = std::get<ChangeValue>(instr).delta();
-
-            if(cell_tracking_active && net_cell_change != 0 && delta == -net_cell_change) {
-                // Canceling change detected
-                net_cell_change = 0;
-            } else {
-                net_cell_change += delta;
-                result.emplace_back(instr);
-            }
-        }
-        else {
-            result.emplace_back(instr);
-        }
-    }
-
-    return result;
-}
-
-// Pass 6: Loop Unrolling
-// For small fixed-count loops, unroll the body
-// This is aggressive and only safe for loops we know execute few times
-IRProgram LoopUnrollingPass(IRProgram const& program) {
-    if(program.size() < 4) {
+// Pass 3: Multiplication Loop Detection
+// Recognizes patterns like [->++<] which compute:
+//   while cell[0] != 0:
+//     cell[0] -= 1
+//     cell[offset] += multiplier
+//   cell[0] = 0
+//
+// This replaces the entire loop with a Multiplication instruction
+IRProgram MultiplicationLoopPass(IRProgram const& program) {
+    if(program.size() < 5) {
         return program;
     }
 
@@ -358,39 +218,79 @@ IRProgram LoopUnrollingPass(IRProgram const& program) {
 
     size_t i = 0;
     while(i < program.size()) {
-        if(std::holds_alternative<LoopStart>(program[i])) {
-            int32_t jump_offset = std::get<LoopStart>(program[i]).jump_offset();
-            size_t loop_end_pos = i + jump_offset;
-            size_t loop_body_size = loop_end_pos - i - 1;
+        if(!std::holds_alternative<LoopStart>(program[i])) {
+            result.emplace_back(program[i]);
+            ++i;
+            continue;
+        }
 
-            // Only unroll very small loops (1-2 instructions)
-            // This is conservative - proper unrolling needs value range analysis
-            if(loop_body_size <= 2 && loop_body_size > 0) {
-                // Check if loop body is simple enough
-                bool can_unroll = true;
-                for(size_t j = i + 1; j < loop_end_pos; ++j) {
-                    auto const& body_instr = program[j];
-                    // Don't unroll loops containing nested loops or I/O
-                    if(std::holds_alternative<LoopStart>(body_instr) ||
-                       std::holds_alternative<LoopEnd>(body_instr) ||
-                       std::holds_alternative<OutputCharacter>(body_instr) ||
-                       std::holds_alternative<InputCharacter>(body_instr)) {
-                        can_unroll = false;
-                        break;
-                    }
-                }
+        auto const& loop_start = std::get<LoopStart>(program[i]);
+        int32_t jump_offset = loop_start.jump_offset();
+        size_t loop_end_pos = i + jump_offset;
+        size_t loop_body_size = loop_end_pos - i - 1;
 
-                if(can_unroll) {
-                    // Unroll once (partial unrolling for peephole optimization)
-                    // Full unrolling would require knowing iteration count
-                    for(size_t j = i + 1; j < loop_end_pos; ++j) {
-                        result.emplace_back(program[j]);
+        // Minimum body: ChangeValue{-1}, MovePtr{n}, ChangeValue{m}, MovePtr{-n}
+        // Or: MovePtr{n}, ChangeValue{m}, MovePtr{-n}, ChangeValue{-1}
+        if(loop_body_size < 2 || loop_body_size > 8) {
+            result.emplace_back(program[i]);
+            ++i;
+            continue;
+        }
+
+        // Analyze the loop body
+        int32_t current_offset = 0;
+        bool has_decrement = false;
+        bool net_zero_offset = true;
+        std::vector<std::pair<int32_t, int32_t>> cell_deltas; // (offset, delta)
+        bool is_multiplication = true;
+
+        for(size_t j = i + 1; j < loop_end_pos && is_multiplication; ++j) {
+            auto const& instr = program[j];
+
+            if(std::holds_alternative<MovePtr>(instr)) {
+                current_offset += std::get<MovePtr>(instr).offset();
+            }
+            else if(std::holds_alternative<ChangeValue>(instr)) {
+                auto const& cv = std::get<ChangeValue>(instr);
+                if(current_offset == 0 && cv.delta() == -1) {
+                    // Found the decrement on the current cell
+                    if(has_decrement) {
+                        // Multiple decrements - not a simple multiplication
+                        is_multiplication = false;
+                    } else {
+                        has_decrement = true;
                     }
-                    // Skip the original loop structure
-                    i = loop_end_pos + 1;
-                    continue;
+                } else {
+                    // Record change at this offset
+                    cell_deltas.emplace_back(current_offset, cv.delta());
                 }
             }
+            else if(std::holds_alternative<LoopStart>(instr) ||
+                    std::holds_alternative<LoopEnd>(instr)) {
+                // Nested loops - not a simple multiplication
+                is_multiplication = false;
+            }
+            else {
+                // I/O in loop body - not a multiplication
+                is_multiplication = false;
+            }
+        }
+
+        // Verify the pattern
+        if(!is_multiplication || !has_decrement || current_offset != 0) {
+            result.emplace_back(program[i]);
+            ++i;
+            continue;
+        }
+
+        // Must have exactly one target cell with a non-zero delta
+        // (Multiple targets are possible but complex to represent)
+        if(cell_deltas.size() == 1) {
+            auto [offset, delta] = cell_deltas[0];
+            auto loc = loop_start.location();
+            result.emplace_back(Multiplication{offset, delta, loc});
+            i = loop_end_pos + 1;
+            continue;
         }
 
         result.emplace_back(program[i]);
@@ -400,6 +300,65 @@ IRProgram LoopUnrollingPass(IRProgram const& program) {
     return result;
 }
 
+// Pass 4: Common Subexpression Elimination
+// For Brainfuck, we look for redundant operations like:
+// - MovePtr(n) followed by MovePtr(-n) with no intervening memory access
+// - ChangeValue(n) followed by ChangeValue(-n) with no intervening read
+// This is a peephole optimizer that scans backwards
+IRProgram CommonSubexpressionEliminationPass(IRProgram const& program) {
+    if(program.size() < 2) {
+        return program;
+    }
+
+    IRProgram result = program;
+    bool changed = true;
+
+    // Run multiple passes until no more changes
+    while(changed) {
+        changed = false;
+        IRProgram pass_result{};
+
+        for(size_t i = 0; i < result.size(); ++i) {
+            // Look for canceling pair: MovePtr(n) followed immediately by MovePtr(-n)
+            if(i + 1 < result.size() &&
+               std::holds_alternative<MovePtr>(result[i]) &&
+               std::holds_alternative<MovePtr>(result[i + 1])) {
+                auto const& first = std::get<MovePtr>(result[i]);
+                auto const& second = std::get<MovePtr>(result[i + 1]);
+
+                if(first.offset() == -second.offset()) {
+                    // Canceling moves - skip both
+                    changed = true;
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // Look for canceling pair: ChangeValue(n) followed immediately by ChangeValue(-n)
+            if(i + 1 < result.size() &&
+               std::holds_alternative<ChangeValue>(result[i]) &&
+               std::holds_alternative<ChangeValue>(result[i + 1])) {
+                auto const& first = std::get<ChangeValue>(result[i]);
+                auto const& second = std::get<ChangeValue>(result[i + 1]);
+
+                if(first.delta() == -second.delta()) {
+                    // Canceling changes - skip both
+                    changed = true;
+                    i += 2;
+                    continue;
+                }
+            }
+
+            pass_result.emplace_back(result[i]);
+        }
+
+        result = std::move(pass_result);
+    }
+
+    // Rebuild loop offsets since we may have removed instructions
+    return CombineConsecutivePass(result);
+}
+
 OptimizationConfig GetOptimizationConfig(int level) {
     OptimizationConfig config{};
     config.level = level;
@@ -407,35 +366,27 @@ OptimizationConfig GetOptimizationConfig(int level) {
     switch(level) {
         case 0:
             config.combine_consecutive = false;
-            config.dead_code_elimination = false;
-            config.loop_invariant_motion = false;
-            config.strength_reduction = false;
+            config.clear_cell = false;
+            config.multiplication_loop = false;
             config.common_subexpression_elim = false;
-            config.loop_unrolling = false;
             break;
         case 1:
             config.combine_consecutive = true;
-            config.dead_code_elimination = false;
-            config.loop_invariant_motion = false;
-            config.strength_reduction = false;
+            config.clear_cell = true;
+            config.multiplication_loop = false;
             config.common_subexpression_elim = false;
-            config.loop_unrolling = false;
             break;
         case 2:
             config.combine_consecutive = true;
-            config.dead_code_elimination = true;
-            config.loop_invariant_motion = true;
-            config.strength_reduction = true;
+            config.clear_cell = true;
+            config.multiplication_loop = true;
             config.common_subexpression_elim = true;
-            config.loop_unrolling = false; // Disabled: unsafe without value range analysis
             break;
-        case 3: // Aggressive - for testing
+        case 3: // Aggressive
             config.combine_consecutive = true;
-            config.dead_code_elimination = false; // DCE has issues with nested loops
-            config.loop_invariant_motion = true;
-            config.strength_reduction = true;
+            config.clear_cell = true;
+            config.multiplication_loop = true;
             config.common_subexpression_elim = true;
-            config.loop_unrolling = false;
             break;
         default:
             config.combine_consecutive = true;
@@ -449,30 +400,21 @@ IRProgram OptimizeIR(IRProgram const& program, OptimizationConfig const& config)
     IRProgram result = program;
 
     // Apply passes in order based on config
+    // Order matters: detect patterns first, then eliminate redundancies
+    if(config.clear_cell) {
+        result = ClearCellPass(result);
+    }
+
+    if(config.multiplication_loop) {
+        result = MultiplicationLoopPass(result);
+    }
+
     if(config.combine_consecutive) {
         result = CombineConsecutivePass(result);
     }
 
-    if(config.dead_code_elimination) {
-        result = DeadCodeEliminationPass(result);
-    }
-
-    if(config.loop_invariant_motion) {
-        result = LoopInvariantMotionPass(result);
-    }
-
-    if(config.strength_reduction) {
-        result = StrengthReductionPass(result);
-    }
-
     if(config.common_subexpression_elim) {
         result = CommonSubexpressionEliminationPass(result);
-    }
-
-    if(config.loop_unrolling) {
-        result = LoopUnrollingPass(result);
-        // Run combine pass again after unrolling to merge any new opportunities
-        result = CombineConsecutivePass(result);
     }
 
     return result;

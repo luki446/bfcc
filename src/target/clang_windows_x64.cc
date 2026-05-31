@@ -49,6 +49,39 @@ struct X64AsmVisitor {
         return code;
     }
 
+    std::string operator()(ClearCell const&) {
+        // ClearCell: mov byte ptr [rbx], 0
+        return "\tmov byte ptr [rbx], 0\n";
+    }
+
+    std::string operator()(Multiplication const& mult) {
+        // Multiplication: cell[offset] += cell[0] * multiplier, then cell[0] = 0
+        // For multiplier == 1:  add [rbx+offset], [rbx]; mov [rbx], 0
+        // For multiplier == -1: sub [rbx+offset], [rbx]; mov [rbx], 0
+        // For other values: use imul
+        std::string code{};
+
+        if(mult.multiplier() == 1) {
+            // Add source to destination
+            code += std::format("\tmovzx rax, byte ptr [rbx]\n");
+            code += std::format("\tadd byte ptr [rbx + {}], al\n", mult.offset());
+            code += "\tmov byte ptr [rbx], 0\n";
+        } else if(mult.multiplier() == -1) {
+            // Subtract source from destination
+            code += std::format("\tmovzx rax, byte ptr [rbx]\n");
+            code += std::format("\tsub byte ptr [rbx + {}], al\n", mult.offset());
+            code += "\tmov byte ptr [rbx], 0\n";
+        } else {
+            // General case with imul
+            code += std::format("\tmovzx rax, byte ptr [rbx]\n");
+            code += std::format("\timul rax, {}\n", mult.multiplier());
+            code += std::format("\tadd byte ptr [rbx + {}], al\n", mult.offset());
+            code += "\tmov byte ptr [rbx], 0\n";
+        }
+
+        return code;
+    }
+
     int32_t ir_instruction_index_;
 };
 

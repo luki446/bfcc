@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
             opt_config = GetOptimizationConfig(1); // Default
         }
 
-        if(*verbose && (opt_config.combine_consecutive || opt_config.dead_code_elimination)) {
+        if(*verbose && opt_config.level > 0) {
             std::println("Applying optimization level {}...", opt_level);
         }
 

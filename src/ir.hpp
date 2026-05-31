@@ -78,6 +78,34 @@ private:
     SourceLocation location_;
 };
 
+// ClearCell: represents [-] pattern (set current cell to 0)
+// This is a semantic optimization that allows backends to generate
+// more efficient code than the loop equivalent
+class ClearCell {
+public:
+    constexpr ClearCell() = default;
+    constexpr ClearCell(SourceLocation loc) : location_(loc) {}
+    constexpr SourceLocation location() const { return location_; }
+private:
+    SourceLocation location_;
+};
+
+// Multiplication: represents [-<n*M>+<n*N>] pattern
+// Common Brainfuck idiom for cell[x] += cell[p] * multiplier
+// where p is current pointer, and x is p + offset
+class Multiplication {
+public:
+    constexpr Multiplication(int32_t offset, int32_t multiplier) : offset_(offset), multiplier_(multiplier) {}
+    constexpr Multiplication(int32_t offset, int32_t multiplier, SourceLocation loc)
+        : offset_(offset), multiplier_(multiplier), location_(loc) {}
+    constexpr int32_t offset() const { return offset_; }
+    constexpr int32_t multiplier() const { return multiplier_; }
+    constexpr SourceLocation location() const { return location_; }
+private:
+    int32_t offset_;
+    int32_t multiplier_;
+    SourceLocation location_;
+};
 
 using IRInstruction = std::variant<
     MovePtr,
@@ -85,7 +113,9 @@ using IRInstruction = std::variant<
     OutputCharacter,
     InputCharacter,
     LoopStart,
-    LoopEnd
+    LoopEnd,
+    ClearCell,
+    Multiplication
 >;
 
 using IRProgram = std::vector<IRInstruction>;
@@ -130,6 +160,21 @@ template<>
 struct std::formatter<LoopEnd> : std::formatter<std::string> {
     constexpr auto format(const LoopEnd& le, auto& ctx) const {
         return std::formatter<std::string>::format("LoopEnd(jump_offset=" + std::to_string(le.jump_offset()) + ") @" + le.location().toString(), ctx);
+    }
+};
+
+template<>
+struct std::formatter<ClearCell> : std::formatter<std::string> {
+    constexpr auto format(const ClearCell& cc, auto& ctx) const {
+        return std::formatter<std::string>::format("ClearCell @" + cc.location().toString(), ctx);
+    }
+};
+
+template<>
+struct std::formatter<Multiplication> : std::formatter<std::string> {
+    constexpr auto format(const Multiplication& m, auto& ctx) const {
+        return std::formatter<std::string>::format("Multiplication(offset=" + std::to_string(m.offset()) +
+            ", multiplier=" + std::to_string(m.multiplier()) + ") @" + m.location().toString(), ctx);
     }
 };
 
